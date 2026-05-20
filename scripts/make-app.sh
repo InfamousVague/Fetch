@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
 APP="$ROOT/Fetch.app"
 SRC_ICON="$ROOT/art/AppIcon-source.png"
-VERSION="0.1.0"
+VERSION="0.1.1"
 SIGN_IDENTITY="${SIGN_IDENTITY:-0948896DC970503ADEF5B5070E0BB3E9D9047757}"
 real() { python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
 
