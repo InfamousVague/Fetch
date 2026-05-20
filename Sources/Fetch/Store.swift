@@ -5,19 +5,9 @@ import Observation
 @Observable
 final class FetchStore {
     var torrents: [TorrentStatus] = []
-    var searchQuery = ""
-    var settings = SourceSettings.load()
-    var selectedSourceID = "builtin:\(CatalogProvider.internetArchive.rawValue)"
-    var searchResults: [CatalogResult] = []
-    var searching = false
-    var magnetInput = ""
+    var pasteInput = ""
     var lastError: String?
     var downloadDirectory: URL
-
-    var sources: [SearchSource] { settings.searchSources }
-    var selectedSource: SearchSource? {
-        sources.first { $0.id == selectedSourceID } ?? sources.first
-    }
 
     /// Called after each poll so the menu-bar icon can reflect state.
     @ObservationIgnored var onStatus: (() -> Void)?
@@ -48,87 +38,45 @@ final class FetchStore {
     var downloads: [TorrentStatus] { torrents.filter(\.isActiveDownload) }
     var seeding: [TorrentStatus] { torrents.filter(\.isSeeding) }
 
-    // MARK: Search
+    // MARK: Add
 
-    func search() {
-        guard let src = selectedSource else { return }
-        let q = searchQuery
-        searching = true
-        searchResults = []
+    /// One entry point that figures out whether the user pasted a magnet
+    /// link, an http(s) URL to a .torrent, or a local file path. Keeps the
+    /// UI to a single field + one button.
+    func add() {
+        let raw = pasteInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return }
         Task {
             do {
-                self.searchResults = try await Catalog.search(src, q)
-            } catch {
-                self.lastError = "Search failed: \(error.localizedDescription)"
-            }
-            self.searching = false
-        }
-    }
-
-    func download(_ result: CatalogResult) {
-        Task {
-            do {
-                switch result.ref {
-                case .magnet(let m):
-                    try engine.addMagnet(Catalog.withTrackers(m, settings.trackers))
-                case .torrentURL(let url):
+                if raw.hasPrefix("magnet:") {
+                    try engine.addMagnet(raw)
+                } else if let url = URL(string: raw),
+                          let scheme = url.scheme?.lowercased(),
+                          scheme == "http" || scheme == "https" {
                     var req = URLRequest(url: url)
                     req.timeoutInterval = 30
                     let (data, resp) = try await URLSession.shared.data(for: req)
                     guard (resp as? HTTPURLResponse)?.statusCode == 200 else {
                         throw EngineError.invalidTorrentData
                     }
-                    try engine.addTorrent(data: data, fallbackName: result.title)
+                    let name = url.deletingPathExtension().lastPathComponent
+                    try engine.addTorrent(data: data, fallbackName: name)
+                } else {
+                    // Treat as a local file path (with or without file://)
+                    let path = raw.hasPrefix("file://")
+                        ? URL(string: raw)?.path ?? raw
+                        : raw
+                    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+                    let data = try Data(contentsOf: url)
+                    let name = url.deletingPathExtension().lastPathComponent
+                    try engine.addTorrent(data: data, fallbackName: name)
                 }
-                poll()
+                self.pasteInput = ""
+                self.poll()
             } catch {
-                self.lastError = "Couldn't add \(result.title): \(error.localizedDescription)"
+                self.lastError = error.localizedDescription
             }
         }
-    }
-
-    // MARK: Add / import
-
-    func addMagnet() {
-        let m = magnetInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !m.isEmpty else { return }
-        do {
-            try engine.addMagnet(Catalog.withTrackers(m, settings.trackers))
-            magnetInput = ""
-            poll()
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    // MARK: Sources settings (persisted)
-
-    func setBuiltin(_ p: CatalogProvider, enabled: Bool) {
-        if enabled { settings.disabledBuiltins.remove(p.rawValue) }
-        else { settings.disabledBuiltins.insert(p.rawValue) }
-        commitSettings()
-    }
-    func addTracker(_ url: String) {
-        let u = url.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !u.isEmpty, !settings.trackers.contains(u) else { return }
-        settings.trackers.append(u); commitSettings()
-    }
-    func removeTracker(_ url: String) { settings.trackers.removeAll { $0 == url }; commitSettings() }
-    func addTorznab(name: String, url: String, apiKey: String) {
-        guard !url.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        settings.torznab.append(TorznabIndexer(name: name, url: url, apiKey: apiKey))
-        commitSettings()
-    }
-    func removeTorznab(_ id: String) { settings.torznab.removeAll { $0.id == id }; commitSettings() }
-    func addFeed(name: String, url: String) {
-        guard !url.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        settings.feeds.append(FeedSource(name: name, url: url)); commitSettings()
-    }
-    func removeFeed(_ id: String) { settings.feeds.removeAll { $0.id == id }; commitSettings() }
-
-    private func commitSettings() {
-        settings.save()
-        if selectedSource == nil { selectedSourceID = sources.first?.id ?? "" }
     }
 
     func importTorrent(at url: URL) {
